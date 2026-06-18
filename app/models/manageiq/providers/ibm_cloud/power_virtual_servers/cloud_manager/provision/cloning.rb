@@ -80,7 +80,6 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
     specs['user_data'] = user_script_text64 unless user_script_text64.nil?
 
     attached_volumes = options[:cloud_volumes] || []
-    attached_volumes.concat(phase_context[:new_volumes]).compact!
     specs['volume_ids'] = attached_volumes unless attached_volumes.empty?
 
     attached_networks = case get_option(:vlan)
@@ -144,9 +143,15 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
       when 'BUILD'
         status = 'The server is being provisioned.'
       when 'ACTIVE'
-        stop = (instance.processors.to_f > 0) && (instance.memory.to_f > 0)
-        phase_context[:cloud_api_completion_time] = Time.zone.now.utc if stop
-        status = "The server has been provisioned.; #{stop ? 'Server description available.' : 'Waiting for server description.'}"
+        if phase_context[:post_vm_volume_attachment_complete]
+          stop = (instance.processors.to_f > 0) && (instance.memory.to_f > 0)
+          phase_context[:cloud_api_completion_time] = Time.zone.now.utc if stop
+          status = "The server has been provisioned.; #{stop ? 'Server description available.' : 'Waiting for server description.'}"
+        else
+          create_and_attach_affinity_volumes(clone_task_ref, instance.server_name)
+          phase_context[:post_vm_volume_attachment_complete] = true
+          status = 'The server has been provisioned. Affinity volumes created and attached.'
+        end
       when 'ERROR'
         raise MiqException::MiqProvisionError, _("An error occurred while provisioning the instance.")
       else
@@ -163,6 +168,30 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
       return false, "VM initializing, attaching storage..."
     else
       raise
+    end
+  end
+
+  def create_and_attach_affinity_volumes(vm_ems_ref, vm_instance_name)
+    new_volumes = options[:new_volumes] || []
+    return if new_volumes.empty?
+
+    phase_context[:new_volumes] ||= []
+
+    source.with_provider_connection(:service => "PCloudVolumesApi") do |api|
+      new_volumes.each do |new_volume|
+        volume_params = new_volume.merge(
+          :affinity_policy       => "affinity",
+          :affinity_pvm_instance => vm_instance_name
+        )
+
+        created_volume = api.pcloud_cloudinstances_volumes_post(
+          cloud_instance_id,
+          IbmCloudPower::CreateDataVolume.new(volume_params)
+        )
+
+        phase_context[:new_volumes] << created_volume.volume_id
+        api.pcloud_pvminstances_volumes_post(cloud_instance_id, vm_ems_ref, created_volume.volume_id)
+      end
     end
   end
 end
