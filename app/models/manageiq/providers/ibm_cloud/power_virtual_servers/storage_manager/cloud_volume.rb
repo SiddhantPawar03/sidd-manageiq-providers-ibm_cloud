@@ -26,7 +26,11 @@ class ManageIQ::Providers::IbmCloud::PowerVirtualServers::StorageManager::CloudV
   end
 
   def available_vms
-    availability_zone.vms.select { |vm| vm.format == volume_type }
+    # VMs with storage_type "any" can attach to volumes of any type
+    # Otherwise, storage types must match
+    availability_zone.vms.select do |vm|
+      vm.format.to_s.casecmp?("any") || vm.format.to_s.casecmp?(volume_type.to_s)
+    end
   end
 
   def cloud_instance_id
