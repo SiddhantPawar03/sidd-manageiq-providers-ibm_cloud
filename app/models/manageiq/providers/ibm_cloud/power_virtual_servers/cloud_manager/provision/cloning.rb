@@ -62,15 +62,19 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
       specs['profile_id']   = get_option_last(:sys_type)
       specs['ssh_key_name'] = chosen_key_pair unless chosen_key_pair == 'None'
     else
-      specs['server_name']   = get_option(:vm_target_name)
-      specs['memory']        = get_option_last(:vm_memory).to_i
-      specs['processors']    = get_option_last(:entitled_processors).to_f
-      specs['proc_type']     = get_option_last(:instance_type)
-      specs['pin_policy']    = get_option_last(:pin_policy)
-      specs['replicants']    = 1 # TODO: we have to use this field instead of what 'MIQ' does
-      specs['key_pair_name'] = chosen_key_pair unless chosen_key_pair == 'None'
-      specs['storage_type']  = get_option_last(:storage_type)
-      specs['sys_type']      = get_option_last(:sys_type)
+      specs['server_name']          = get_option(:vm_target_name)
+      specs['memory']               = get_option_last(:vm_memory).to_i
+      specs['processors']           = get_option_last(:entitled_processors).to_f
+      specs['proc_type']            = get_option_last(:instance_type)
+      specs['pin_policy']           = get_option_last(:pin_policy)
+      specs['replicants']           = 1 # TODO: we have to use this field instead of what 'MIQ' does
+      specs['key_pair_name']        = chosen_key_pair unless chosen_key_pair == 'None'
+      specs['storage_type']         = get_option_last(:storage_type)
+      specs['sys_type']             = get_option_last(:sys_type)
+      # Pre-created volumes may be placed in any storage pool by PowerVS.
+      # Disabling storage pool affinity allows the VM to attach volumes from
+      # different pools, preventing "all volumes are not in the same storage pool" errors.
+      specs['storage_pool_affinity'] = false
     end
 
     specs['placement_group'] = get_option(:placement_group) unless get_option(:placement_group).nil?
@@ -80,6 +84,7 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
     specs['user_data'] = user_script_text64 unless user_script_text64.nil?
 
     attached_volumes = options[:cloud_volumes] || []
+    attached_volumes.concat(phase_context[:new_volumes]).compact!
     specs['volume_ids'] = attached_volumes unless attached_volumes.empty?
 
     attached_networks = case get_option(:vlan)
@@ -143,15 +148,9 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
       when 'BUILD'
         status = 'The server is being provisioned.'
       when 'ACTIVE'
-        if phase_context[:post_vm_volume_attachment_complete]
-          stop = (instance.processors.to_f > 0) && (instance.memory.to_f > 0)
-          phase_context[:cloud_api_completion_time] = Time.zone.now.utc if stop
-          status = "The server has been provisioned.; #{stop ? 'Server description available.' : 'Waiting for server description.'}"
-        else
-          create_and_attach_affinity_volumes(clone_task_ref, instance.server_name)
-          phase_context[:post_vm_volume_attachment_complete] = true
-          status = 'The server has been provisioned. Affinity volumes created and attached.'
-        end
+        stop = (instance.processors.to_f > 0) && (instance.memory.to_f > 0)
+        phase_context[:cloud_api_completion_time] = Time.zone.now.utc if stop
+        status = "The server has been provisioned.; #{stop ? 'Server description available.' : 'Waiting for server description.'}"
       when 'ERROR'
         raise MiqException::MiqProvisionError, _("An error occurred while provisioning the instance.")
       else
