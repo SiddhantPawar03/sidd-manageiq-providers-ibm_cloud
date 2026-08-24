@@ -152,82 +152,76 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
     ids = Array(clone_task_ref)
 
     source.with_provider_connection(:service => "PCloudPVMInstancesApi") do |api|
-      statuses = ids.map do |id|
-        instance = api.pcloud_pvminstances_get(cloud_instance_id, id)
+      statuses = ids.each_with_object(Hash.new { |h, k| h[k] = [] }) do |id, result|
+        begin
+          instance = api.pcloud_pvminstances_get(cloud_instance_id, id)
 
-        [
-          id,
-          instance,
-          instance.status,
-          instance.processors.to_f,
-          instance.memory.to_f
-        ]
-      rescue IbmCloudPower::ApiError => e
-        _log.warn("Transient error polling instance #{id}: #{e.message}. Will retry.")
+          result[instance.status] << {
+            :id       => id,
+            :instance => instance
+          }
 
-        [
-          id,
-          nil,
-          'BUILD',
-          0,
-          0
-        ]
+          if instance.status == 'ACTIVE' &&
+             instance.processors.to_f > 0 &&
+             instance.memory.to_f > 0
+            result['ACTIVE_READY'] << {
+              :id       => id,
+              :instance => instance
+            }
+          end
+        rescue IbmCloudPower::ApiError => e
+          # The instance may not be queryable immediately after creation (transient
+          # 500s are common in the first few seconds).  Treat it as still building.
+          _log.warn("Transient error polling instance #{id}: #{e.message}. Will retry.")
+          result['BUILD'] << {:id => id}
+        end
       end
 
-      errored = statuses.select { |_, _, state, _, _| state == 'ERROR' }
       raise MiqException::MiqProvisionError,
-            _("An error occurred while provisioning the instance.") if errored.any?
+            _("An error occurred while provisioning the instance.") if statuses['ERROR'].any?
 
-      building = statuses.select { |_, _, state, _, _| state == 'BUILD' }
-
-      active_instances = statuses.select do |_, _, state, _, _|
-        state == 'ACTIVE'
+      if statuses['BUILD'].any?
+        return false,
+              "#{statuses['BUILD'].length} of #{ids.length} instance(s) still provisioning."
       end
 
-      if building.empty? &&
-         active_instances.length == ids.length &&
-         options[:new_volumes].present?
-        pending_instances = active_instances.reject do |id, _instance, _, _, _|
-          phase_context.fetch(:affinity_volumes_attached, {}).key?(id)
+      if options[:new_volumes].present?
+        pending_instances = statuses['ACTIVE'].reject do |entry|
+          phase_context.fetch(:affinity_volumes_attached, {}).key?(entry[:id])
         end
 
         if pending_instances.any?
-          pending_instances.each do |id, instance, _, _, _|
+          pending_instances.each do |entry|
             create_and_attach_affinity_volumes(
-              id,
-              instance.server_name
+              entry[:id],
+              entry[:instance].server_name
             )
+
             phase_context[:affinity_volumes_attached] ||= {}
-            phase_context[:affinity_volumes_attached][id] = true
+            phase_context[:affinity_volumes_attached][entry[:id]] = true
           end
 
           return false,
-                 "Instances active. Creating and attaching affinity volumes."
+                "Instances active. Creating and attaching affinity volumes."
         end
       end
 
-      active = statuses.select do |_, _, state, cpus, mem|
-        state == 'ACTIVE' && cpus > 0 && mem > 0
-      end
-
-      all_done = building.empty? && active.length == ids.length
+      all_done = statuses['ACTIVE_READY'].length == ids.length
 
       phase_context[:cloud_api_completion_time] = Time.zone.now.utc if all_done
 
       status =
-        if building.any?
-          "#{building.length} of #{ids.length} instance(s) still provisioning."
-        elsif all_done
+        if all_done
           "All #{ids.length} instance(s) provisioned and active."
         else
-          "#{active.length} of #{ids.length} instance(s) active, waiting for full description."
+          "#{statuses['ACTIVE_READY'].length} of #{ids.length} instance(s) active, waiting for full description."
         end
 
       return all_done, status
     end
   rescue IbmCloudPower::ApiError => err
-    if err.code.to_i == 500 &&
-       err.response_body.to_s.include?("in process of bdm attachment")
+    # Handle HTTP 500 errors during VM initialization (e.g., BDM attachment in progress)
+    if err.code.to_i == 500 && err.response_body.to_s.include?("in process of bdm attachment")
       _log.info("VM is still initializing (attaching block devices), will retry")
       return false, "VM initializing, attaching storage..."
     else
@@ -247,11 +241,12 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
       instance_index = phase_context[:affinity_volume_instance_index]
 
       new_volumes.each do |new_volume|
-        vol_name = if get_option(:replicants).to_i > 1
-                     "#{new_volume[:name]}#{format("%03d", instance_index)}"
-                   else
-                     new_volume[:name]
-                   end
+        vol_name =
+          if get_option(:replicants).to_i > 1
+            "#{new_volume[:name]}#{format('%03d', instance_index)}"
+          else
+            new_volume[:name]
+          end
 
         volume_params = new_volume.merge(
           :name                  => vol_name,
@@ -265,24 +260,11 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
         )
 
         begin
-          api.pcloud_pvminstances_volumes_post(
-            cloud_instance_id,
-            vm_ems_ref,
-            created_volume.volume_id
-          )
-
+          api.pcloud_pvminstances_volumes_post(cloud_instance_id, vm_ems_ref, created_volume.volume_id)
           phase_context[:new_volumes] << created_volume.volume_id
         rescue IbmCloudPower::ApiError
-          _log.warn(
-            "Failed to attach volume #{created_volume.volume_id} " \
-            "to #{vm_ems_ref}, deleting orphaned volume"
-          )
-
-          api.pcloud_cloudinstances_volumes_delete(
-            cloud_instance_id,
-            created_volume.volume_id
-          )
-
+          _log.warn("Failed to attach volume #{created_volume.volume_id} to #{vm_ems_ref}, deleting orphaned volume")
+          api.pcloud_cloudinstances_volumes_delete(cloud_instance_id, created_volume.volume_id)
           raise
         end
       end
