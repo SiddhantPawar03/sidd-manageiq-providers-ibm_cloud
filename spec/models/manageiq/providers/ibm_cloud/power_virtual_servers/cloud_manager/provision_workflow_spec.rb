@@ -173,6 +173,14 @@ describe ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provi
         def cloud_instance_id
           "cloud-instance-id"
         end
+
+        def get_option(key)
+          options[key]
+        end
+
+        def _log
+          @log ||= Logger.new(nil)
+        end
       end
     end
 
@@ -220,7 +228,6 @@ describe ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provi
       allow(provision.source).to receive(:with_provider_connection).with(:service => "PCloudVolumesApi").and_yield(volume_api)
       allow(volume_api).to receive(:pcloud_cloudinstances_volumes_post).and_return(created_volume1, created_volume2, created_volume3, created_volume4)
       allow(volume_api).to receive(:pcloud_pvminstances_volumes_post)
-      allow(provision).to receive(:get_option).with(:replicants).and_return(4)
 
       provision.create_and_attach_affinity_volumes("id-1", "vm1")
       provision.create_and_attach_affinity_volumes("id-2", "vm2")
