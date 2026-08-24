@@ -159,6 +159,9 @@ describe ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provi
       Class.new do
         include ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provision::Cloning
 
+        public :check_task_clone
+        public :create_and_attach_affinity_volumes
+
         attr_accessor :options, :phase_context
 
         def initialize
