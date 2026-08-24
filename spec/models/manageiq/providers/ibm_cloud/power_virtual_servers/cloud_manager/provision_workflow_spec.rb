@@ -227,9 +227,13 @@ describe ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provi
       created_volume2 = double(:volume_id => "vol-2")
       created_volume3 = double(:volume_id => "vol-3")
       created_volume4 = double(:volume_id => "vol-4")
+      volume_requests = []
 
       allow(provision.source).to receive(:with_provider_connection).with(:service => "PCloudVolumesApi").and_yield(volume_api)
-      allow(volume_api).to receive(:pcloud_cloudinstances_volumes_post).and_return(created_volume1, created_volume2, created_volume3, created_volume4)
+      allow(volume_api).to receive(:pcloud_cloudinstances_volumes_post) do |_cloud_instance_id, create_data_volume|
+        volume_requests << create_data_volume
+        [created_volume1, created_volume2, created_volume3, created_volume4][volume_requests.length - 1]
+      end
       allow(volume_api).to receive(:pcloud_pvminstances_volumes_post)
 
       provision.create_and_attach_affinity_volumes("id-1", "vm1")
@@ -237,22 +241,8 @@ describe ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provi
       provision.create_and_attach_affinity_volumes("id-3", "vm3")
       provision.create_and_attach_affinity_volumes("id-4", "vm4")
 
-      expect(volume_api).to have_received(:pcloud_cloudinstances_volumes_post).with(
-        "cloud-instance-id",
-        an_object_having_attributes(:name => "data001", :affinity_pvm_instance => "vm1")
-      ).once
-      expect(volume_api).to have_received(:pcloud_cloudinstances_volumes_post).with(
-        "cloud-instance-id",
-        an_object_having_attributes(:name => "data002", :affinity_pvm_instance => "vm2")
-      ).once
-      expect(volume_api).to have_received(:pcloud_cloudinstances_volumes_post).with(
-        "cloud-instance-id",
-        an_object_having_attributes(:name => "data003", :affinity_pvm_instance => "vm3")
-      ).once
-      expect(volume_api).to have_received(:pcloud_cloudinstances_volumes_post).with(
-        "cloud-instance-id",
-        an_object_having_attributes(:name => "data004", :affinity_pvm_instance => "vm4")
-      ).once
+      expect(volume_requests.map(&:name)).to eq(%w[data001 data002 data003 data004])
+      expect(volume_requests.map(&:affinity_pvm_instance)).to eq(%w[vm1 vm2 vm3 vm4])
       expect(provision.phase_context[:affinity_volume_sequence]).to eq(4)
     end
   end
