@@ -223,6 +223,16 @@ describe ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provi
       provision.phase_context = {:new_volumes => []}
 
       volume_api = instance_double("PCloudVolumesApi")
+      create_data_volume_class = Class.new do
+        attr_reader :name, :affinity_pvm_instance
+
+        def initialize(params)
+          @name = params[:name]
+          @affinity_pvm_instance = params[:affinity_pvm_instance]
+        end
+      end
+      stub_const("IbmCloudPower::CreateDataVolume", create_data_volume_class)
+
       created_volume1 = double(:volume_id => "vol-1")
       created_volume2 = double(:volume_id => "vol-2")
       created_volume3 = double(:volume_id => "vol-3")
