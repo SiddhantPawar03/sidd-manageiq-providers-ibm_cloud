@@ -154,6 +154,99 @@ describe ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provi
     end
   end
 
+  context "cloning affinity volumes" do
+    let(:provision_class) do
+      Class.new do
+        include ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provision::Cloning
+
+        attr_accessor :options, :phase_context
+
+        def initialize
+          @options = {}
+          @phase_context = {}
+        end
+
+        def source
+          @source ||= Object.new
+        end
+
+        def cloud_instance_id
+          "cloud-instance-id"
+        end
+      end
+    end
+
+    let(:provision) { provision_class.new }
+    let(:api) { instance_double("PCloudPVMInstancesApi") }
+    let(:instance1) { double(:status => "ACTIVE", :processors => 1.0, :memory => 1024, :server_name => "vm1") }
+    let(:instance2) { double(:status => "ACTIVE", :processors => 1.0, :memory => 1024, :server_name => "vm2") }
+
+    it "creates affinity volumes once per active instance" do
+      provision.options = {:new_volumes => [{:name => "data", :size => 10}]}
+      allow(provision.source).to receive(:with_provider_connection).and_yield(api)
+      allow(api).to receive(:pcloud_pvminstances_get).with("cloud-instance-id", "id-1").and_return(instance1)
+      allow(api).to receive(:pcloud_pvminstances_get).with("cloud-instance-id", "id-2").and_return(instance2)
+      allow(provision).to receive(:create_and_attach_affinity_volumes)
+
+      complete, status = provision.check_task_clone(["id-1", "id-2"])
+
+      expect(complete).to be(false)
+      expect(status).to eq("Instances active. Creating and attaching affinity volumes.")
+      expect(provision).to have_received(:create_and_attach_affinity_volumes).with("id-1", "vm1").once
+      expect(provision).to have_received(:create_and_attach_affinity_volumes).with("id-2", "vm2").once
+      expect(provision.phase_context[:affinity_volumes_attached]).to eq({"id-1" => true, "id-2" => true})
+
+      complete, status = provision.check_task_clone(["id-1", "id-2"])
+
+      expect(complete).to be(true)
+      expect(status).to eq("All 2 instance(s) provisioned and active.")
+      expect(provision).to have_received(:create_and_attach_affinity_volumes).with("id-1", "vm1").once
+      expect(provision).to have_received(:create_and_attach_affinity_volumes).with("id-2", "vm2").once
+    end
+
+    it "uses a per-request sequence for replicated affinity volume names" do
+      provision.options = {
+        :new_volumes => [{:name => "data", :size => 10}],
+        :replicants  => 4
+      }
+      provision.phase_context = {:new_volumes => []}
+
+      volume_api = instance_double("PCloudVolumesApi")
+      created_volume1 = double(:volume_id => "vol-1")
+      created_volume2 = double(:volume_id => "vol-2")
+      created_volume3 = double(:volume_id => "vol-3")
+      created_volume4 = double(:volume_id => "vol-4")
+
+      allow(provision.source).to receive(:with_provider_connection).with(:service => "PCloudVolumesApi").and_yield(volume_api)
+      allow(volume_api).to receive(:pcloud_cloudinstances_volumes_post).and_return(created_volume1, created_volume2, created_volume3, created_volume4)
+      allow(volume_api).to receive(:pcloud_pvminstances_volumes_post)
+      allow(provision).to receive(:get_option).with(:replicants).and_return(4)
+
+      provision.create_and_attach_affinity_volumes("id-1", "vm1")
+      provision.create_and_attach_affinity_volumes("id-2", "vm2")
+      provision.create_and_attach_affinity_volumes("id-3", "vm3")
+      provision.create_and_attach_affinity_volumes("id-4", "vm4")
+
+      expect(volume_api).to have_received(:pcloud_cloudinstances_volumes_post).with(
+        "cloud-instance-id",
+        an_object_having_attributes(:name => "data001", :affinity_pvm_instance => "vm1")
+      ).once
+      expect(volume_api).to have_received(:pcloud_cloudinstances_volumes_post).with(
+        "cloud-instance-id",
+        an_object_having_attributes(:name => "data002", :affinity_pvm_instance => "vm2")
+      ).once
+      expect(volume_api).to have_received(:pcloud_cloudinstances_volumes_post).with(
+        "cloud-instance-id",
+        an_object_having_attributes(:name => "data003", :affinity_pvm_instance => "vm3")
+      ).once
+      expect(volume_api).to have_received(:pcloud_cloudinstances_volumes_post).with(
+        "cloud-instance-id",
+        an_object_having_attributes(:name => "data004", :affinity_pvm_instance => "vm4")
+      ).once
+      expect(provision.phase_context[:affinity_volume_sequence]).to eq(4)
+    end
+  end
+
   context "clone_to_template" do
     let(:vm) { FactoryBot.create(:vm_ibm_cloud_power_virtual_servers, :ext_management_system => ems) }
 

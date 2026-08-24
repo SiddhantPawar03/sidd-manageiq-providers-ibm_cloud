@@ -149,89 +149,90 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
   end
 
   def check_task_clone(clone_task_ref)
-  ids = Array(clone_task_ref)
+    ids = Array(clone_task_ref)
 
-  source.with_provider_connection(:service => "PCloudPVMInstancesApi") do |api|
-    statuses = ids.map do |id|
-      instance = api.pcloud_pvminstances_get(cloud_instance_id, id)
+    source.with_provider_connection(:service => "PCloudPVMInstancesApi") do |api|
+      statuses = ids.map do |id|
+        instance = api.pcloud_pvminstances_get(cloud_instance_id, id)
 
-      [
-        id,
-        instance,
-        instance.status,
-        instance.processors.to_f,
-        instance.memory.to_f
-      ]
-    rescue IbmCloudPower::ApiError => e
-      _log.warn("Transient error polling instance #{id}: #{e.message}. Will retry.")
-
-      [
-        id,
-        nil,
-        'BUILD',
-        0,
-        0
-      ]
-    end
-
-    errored = statuses.select { |_, _, state, _, _| state == 'ERROR' }
-
-    raise MiqException::MiqProvisionError,
-          _("An error occurred while provisioning the instance.") if errored.any?
-
-    building = statuses.select { |_, _, state, _, _| state == 'BUILD' }
-
-    active_instances = statuses.select do |_, _, state, _, _|
-      state == 'ACTIVE'
-    end
-
-    if building.empty? &&
-       active_instances.length == ids.length &&
-       options[:new_volumes].present? &&
-       !options[:new_volume_attachment_complete]
-
-      _log.info("#{self.class}##{__method__} all instances ACTIVE, creating affinity volumes")
-
-      active_instances.each do |id, instance, _, _, _|
-        create_and_attach_affinity_volumes(
+        [
           id,
-          instance.server_name
-        )
+          instance,
+          instance.status,
+          instance.processors.to_f,
+          instance.memory.to_f
+        ]
+      rescue IbmCloudPower::ApiError => e
+        _log.warn("Transient error polling instance #{id}: #{e.message}. Will retry.")
+
+        [
+          id,
+          nil,
+          'BUILD',
+          0,
+          0
+        ]
       end
 
-      options[:new_volume_attachment_complete] = true
+      errored = statuses.select { |_, _, state, _, _| state == 'ERROR' }
+      raise MiqException::MiqProvisionError,
+            _("An error occurred while provisioning the instance.") if errored.any?
 
-      return false,
-             "Instances active. Creating and attaching affinity volumes."
-    end
+      building = statuses.select { |_, _, state, _, _| state == 'BUILD' }
 
-    active = statuses.select do |_, _, state, cpus, mem|
-      state == 'ACTIVE' && cpus > 0 && mem > 0
-    end
-
-    all_done = building.empty? && active.length == ids.length
-
-    phase_context[:cloud_api_completion_time] = Time.zone.now.utc if all_done
-
-    status =
-      if building.any?
-        "#{building.length} of #{ids.length} instance(s) still provisioning."
-      elsif all_done
-        "All #{ids.length} instance(s) provisioned and active."
-      else
-        "#{active.length} of #{ids.length} instance(s) active, waiting for full description."
+      active_instances = statuses.select do |_, _, state, _, _|
+        state == 'ACTIVE'
       end
 
-    return all_done, status
-  end
-rescue IbmCloudPower::ApiError => err
-  if err.code.to_i == 500 &&
-     err.response_body.to_s.include?("in process of bdm attachment")
+      if building.empty? &&
+         active_instances.length == ids.length &&
+         options[:new_volumes].present?
+        pending_instances = active_instances.reject do |id, _instance, _, _, _|
+          phase_context.fetch(:affinity_volumes_attached, {}).key?(id)
+        end
 
-    _log.info("VM is still initializing (attaching block devices), will retry")
-    return false, "VM initializing, attaching storage..."
-  else
-    raise
+        if pending_instances.any?
+          pending_instances.each do |id, instance, _, _, _|
+            create_and_attach_affinity_volumes(
+              id,
+              instance.server_name
+            )
+            phase_context[:affinity_volumes_attached] ||= {}
+            phase_context[:affinity_volumes_attached][id] = true
+          end
+
+          return false,
+                 "Instances active. Creating and attaching affinity volumes."
+        end
+      end
+
+      active = statuses.select do |_, _, state, cpus, mem|
+        state == 'ACTIVE' && cpus > 0 && mem > 0
+      end
+
+      all_done = building.empty? && active.length == ids.length
+
+      phase_context[:cloud_api_completion_time] = Time.zone.now.utc if all_done
+
+      status =
+        if building.any?
+          "#{building.length} of #{ids.length} instance(s) still provisioning."
+        elsif all_done
+          "All #{ids.length} instance(s) provisioned and active."
+        else
+          "#{active.length} of #{ids.length} instance(s) active, waiting for full description."
+        end
+
+      return all_done, status
+    end
+  rescue IbmCloudPower::ApiError => err
+    if err.code.to_i == 500 &&
+       err.response_body.to_s.include?("in process of bdm attachment")
+      _log.info("VM is still initializing (attaching block devices), will retry")
+      return false, "VM initializing, attaching storage..."
+    else
+      raise
+    end
   end
 
   def create_and_attach_affinity_volumes(vm_ems_ref, vm_instance_name)
@@ -239,10 +240,19 @@ rescue IbmCloudPower::ApiError => err
     return if new_volumes.empty?
 
     phase_context[:new_volumes] ||= []
+    phase_context[:affinity_volume_sequence] ||= 0
 
     source.with_provider_connection(:service => "PCloudVolumesApi") do |api|
       new_volumes.each do |new_volume|
+        phase_context[:affinity_volume_sequence] += 1
+        vol_name = if get_option(:replicants).to_i > 1
+                     "#{new_volume[:name]}#{format("%03d", phase_context[:affinity_volume_sequence])}"
+                   else
+                     new_volume[:name]
+                   end
+
         volume_params = new_volume.merge(
+          :name                  => vol_name,
           :affinity_policy       => "affinity",
           :affinity_pvm_instance => vm_instance_name
         )
@@ -253,11 +263,24 @@ rescue IbmCloudPower::ApiError => err
         )
 
         begin
-          api.pcloud_pvminstances_volumes_post(cloud_instance_id, vm_ems_ref, created_volume.volume_id)
+          api.pcloud_pvminstances_volumes_post(
+            cloud_instance_id,
+            vm_ems_ref,
+            created_volume.volume_id
+          )
+
           phase_context[:new_volumes] << created_volume.volume_id
         rescue IbmCloudPower::ApiError
-          _log.warn("Failed to attach volume #{created_volume.volume_id} to #{vm_ems_ref}, deleting orphaned volume")
-          api.pcloud_cloudinstances_volumes_delete(cloud_instance_id, created_volume.volume_id)
+          _log.warn(
+            "Failed to attach volume #{created_volume.volume_id} " \
+            "to #{vm_ems_ref}, deleting orphaned volume"
+          )
+
+          api.pcloud_cloudinstances_volumes_delete(
+            cloud_instance_id,
+            created_volume.volume_id
+          )
+
           raise
         end
       end
