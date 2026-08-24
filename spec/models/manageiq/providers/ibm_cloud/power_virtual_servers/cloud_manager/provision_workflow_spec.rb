@@ -253,7 +253,7 @@ describe ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provi
 
       expect(volume_requests.map(&:name)).to eq(%w[data001 data002 data003 data004])
       expect(volume_requests.map(&:affinity_pvm_instance)).to eq(%w[vm1 vm2 vm3 vm4])
-      expect(provision.phase_context[:affinity_volume_sequence]).to eq(4)
+      expect(provision.phase_context[:affinity_volume_instance_index]).to eq(4)
     end
   end
 
