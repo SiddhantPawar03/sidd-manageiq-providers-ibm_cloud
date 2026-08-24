@@ -240,13 +240,15 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
     return if new_volumes.empty?
 
     phase_context[:new_volumes] ||= []
-    phase_context[:affinity_volume_sequence] ||= 0
+    phase_context[:affinity_volume_instance_index] ||= 0
 
     source.with_provider_connection(:service => "PCloudVolumesApi") do |api|
+      phase_context[:affinity_volume_instance_index] += 1
+      instance_index = phase_context[:affinity_volume_instance_index]
+
       new_volumes.each do |new_volume|
-        phase_context[:affinity_volume_sequence] += 1
         vol_name = if get_option(:replicants).to_i > 1
-                     "#{new_volume[:name]}#{format("%03d", phase_context[:affinity_volume_sequence])}"
+                     "#{new_volume[:name]}#{format("%03d", instance_index)}"
                    else
                      new_volume[:name]
                    end
