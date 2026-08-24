@@ -4,10 +4,12 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
   end
 
   def prepare_for_clone_task
+    _log.info("#{self.class}##{__method__} request_type=#{request_type}")
     request_type == 'clone_to_template' ? prepare_for_clone_to_template : prepare_for_clone
   end
 
   def start_clone(clone_options)
+    _log.info("#{self.class}##{__method__} request_type=#{request_type}")
     if request_type == 'clone_to_template'
       make_request_clone_to_template(clone_options)
     elsif sap_image?
@@ -22,6 +24,7 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
   end
 
   def do_clone_task_check(clone_task_ref)
+    _log.info("#{self.class}##{__method__} clone_task_ref=#{clone_task_ref}")
     request_type == 'clone_to_template' ? check_task_clone_to_template(clone_task_ref) : check_task_clone(clone_task_ref)
   end
 
@@ -50,8 +53,6 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
   end
 
   def prepare_for_clone
-    replicants = get_option(:replicants)
-
     specs = {
       'image_id'   => get_option_last(:src_vm_id),
       'pin_policy' => get_option_last(:pin_policy),
@@ -64,37 +65,24 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
       specs['profile_id']   = get_option_last(:sys_type)
       specs['ssh_key_name'] = chosen_key_pair unless chosen_key_pair == 'None'
     else
-      specs['server_name']             = get_option(:vm_target_name)
-      specs['memory']                  = get_option_last(:vm_memory).to_i
-      specs['processors']              = get_option_last(:entitled_processors).to_f
-      specs['proc_type']               = get_option_last(:instance_type)
-      specs['pin_policy']              = get_option_last(:pin_policy)
-      specs['replicant_naming_scheme'] = 'suffix' if replicants > 1
-      specs['key_pair_name']           = chosen_key_pair unless chosen_key_pair == 'None'
-      specs['storage_type']            = get_option_last(:storage_type)
-      specs['sys_type']                = get_option_last(:sys_type)
-      # Pre-created volumes may be placed in any storage pool by PowerVS.
-      # Disabling storage pool affinity allows the VM to attach volumes from
-      # different pools, preventing "all volumes are not in the same storage pool" errors.
-      specs['storage_pool_affinity'] = false
+      specs['server_name']   = get_option(:vm_target_name)
+      specs['memory']        = get_option_last(:vm_memory).to_i
+      specs['processors']    = get_option_last(:entitled_processors).to_f
+      specs['proc_type']     = get_option_last(:instance_type)
+      specs['pin_policy']    = get_option_last(:pin_policy)
+      specs['replicants']    = 1 # TODO: we have to use this field instead of what 'MIQ' does
+      specs['key_pair_name'] = chosen_key_pair unless chosen_key_pair == 'None'
+      specs['storage_type']  = get_option_last(:storage_type)
+      specs['sys_type']      = get_option_last(:sys_type)
     end
-    # When the count of VMs is more than 1, treat it as a multi-VM provision request with replicas
-    # placement_group and shared_processor_pool fields are no longer relevant
-    # replicants and replicant_affinity_policy(defaults to none) fields are relevant
-    if replicants > 1
-      specs['replicants'] = replicants
-      policy = get_option(:colocation_policy)
-      specs['replicant_affinity_policy'] = policy if policy.present? && policy != 'none'
-    else
-      specs['placement_group'] = get_option(:placement_group) unless get_option(:placement_group).nil?
-      specs['shared_processor_pool'] = get_option(:shared_processor_pool) unless get_option(:shared_processor_pool).nil?
-    end
+
+    specs['placement_group'] = get_option(:placement_group) unless get_option(:placement_group).nil?
+    specs['shared_processor_pool'] = get_option(:shared_processor_pool) unless get_option(:shared_processor_pool).nil?
     user_script_text = options[:user_script_text]
     user_script_text64 = Base64.encode64(user_script_text) unless user_script_text.nil?
     specs['user_data'] = user_script_text64 unless user_script_text64.nil?
 
     attached_volumes = options[:cloud_volumes] || []
-    attached_volumes.concat(phase_context[:new_volumes]).compact!
     specs['volume_ids'] = attached_volumes unless attached_volumes.empty?
 
     attached_networks = case get_option(:vlan)
@@ -117,7 +105,9 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
     source.with_provider_connection(:service => "PCloudPVMInstancesApi") do |api|
       vm = Vm.find(get_option(:src_vm_id))
       body = IbmCloudPower::PVMInstanceCapture.new(clone_options)
+      _log.info("#{self.class}##{__method__} capturing VM #{vm.uid_ems} as template")
       response = api.pcloud_v2_pvminstances_capture_post(cloud_instance_id, vm.uid_ems, body)
+      _log.info("#{self.class}##{__method__} capture job id=#{response.id}")
       response.id
     end
   end
@@ -125,16 +115,22 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
   def make_request_clone_sap_vm(clone_options)
     source.with_provider_connection(:service => "PCloudSAPApi") do |api|
       body = IbmCloudPower::SAPCreate.new(clone_options)
+      _log.info("#{self.class}##{__method__} creating SAP VM")
       response = api.pcloud_sap_post(cloud_instance_id, body)
-      response&.first&.pvm_instance_id
+      pvm_instance_id = response&.first&.pvm_instance_id
+      _log.info("#{self.class}##{__method__} SAP VM pvm_instance_id=#{pvm_instance_id}")
+      pvm_instance_id
     end
   end
 
   def make_request_clone(clone_options)
     source.with_provider_connection(:service => "PCloudPVMInstancesApi") do |api|
       body = IbmCloudPower::PVMInstanceCreate.new(clone_options)
+      _log.info("#{self.class}##{__method__} creating VM with options=#{clone_options}")
       response = api.pcloud_pvminstances_post(cloud_instance_id, body)
-      response&.filter_map(&:pvm_instance_id)
+      pvm_instance_id = response&.first&.pvm_instance_id
+      _log.info("#{self.class}##{__method__} created VM pvm_instance_id=#{pvm_instance_id}")
+      pvm_instance_id
     end
   end
 
@@ -149,37 +145,39 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
   end
 
   def check_task_clone(clone_task_ref)
-    ids = Array(clone_task_ref)
-
     source.with_provider_connection(:service => "PCloudPVMInstancesApi") do |api|
-      statuses = ids.map do |id|
-        instance = api.pcloud_pvminstances_get(cloud_instance_id, id)
-        [id, instance.status, instance.processors.to_f, instance.memory.to_f]
-      rescue IbmCloudPower::ApiError => e
-        # The instance may not be queryable immediately after creation (transient
-        # 500s are common in the first few seconds).  Treat it as still building.
-        _log.warn("Transient error polling instance #{id}: #{e.message}. Will retry.")
-        [id, 'BUILD', 0, 0]
+      instance = api.pcloud_pvminstances_get(cloud_instance_id, clone_task_ref)
+      instance_state = instance.status
+      stop = false
+
+      _log.info("#{self.class}##{__method__} VM #{clone_task_ref} state=#{instance_state}")
+
+      case instance_state
+      when 'BUILD'
+        status = 'The server is being provisioned.'
+      when 'ACTIVE'
+        _log.info("#{self.class}##{__method__} VM #{clone_task_ref} ACTIVE new_volumes=#{options[:new_volumes]&.size} attachment_complete=#{options[:new_volume_attachment_complete]}")
+        if options[:new_volume_attachment_complete] || options[:new_volumes].blank?
+          # Either volumes already attached, or no new volumes were requested.
+          stop = (instance.processors.to_f > 0) && (instance.memory.to_f > 0)
+          phase_context[:cloud_api_completion_time] = Time.zone.now.utc if stop
+          _log.info("#{self.class}##{__method__} VM #{clone_task_ref} processors=#{instance.processors} memory=#{instance.memory} stop=#{stop}")
+          status = "The server has been provisioned.; #{stop ? 'Server description available.' : 'Waiting for server description.'}"
+        else
+          _log.info("#{self.class}##{__method__} VM #{clone_task_ref} ACTIVE - attaching affinity volumes")
+          create_and_attach_affinity_volumes(clone_task_ref, instance.server_name)
+          options[:new_volume_attachment_complete] = true
+          status = 'The server has been provisioned. Affinity volumes created and attached.'
+        end
+      when 'ERROR'
+        _log.error("#{self.class}##{__method__} VM #{clone_task_ref} entered ERROR state")
+        raise MiqException::MiqProvisionError, _("An error occurred while provisioning the instance.")
+      else
+        status = "Unknown server state received from the cloud API: '#{instance_state}'"
+        _log.warn(status)
       end
 
-      errored = statuses.select { |_, state, _, _| state == 'ERROR' }
-      raise MiqException::MiqProvisionError, _("An error occurred while provisioning the instance.") if errored.any?
-
-      building = statuses.select { |_, state, _, _| state == 'BUILD' }
-      active   = statuses.select { |_, state, cpus, mem| state == 'ACTIVE' && cpus > 0 && mem > 0 }
-      all_done = building.empty? && active.length == ids.length
-
-      phase_context[:cloud_api_completion_time] = Time.zone.now.utc if all_done
-
-      status = if building.any?
-                 "#{building.length} of #{ids.length} instance(s) still provisioning."
-               elsif all_done
-                 "All #{ids.length} instance(s) provisioned and active."
-               else
-                 "#{active.length} of #{ids.length} instance(s) active, waiting for full description."
-               end
-
-      return all_done, status
+      return stop, status
     end
   rescue IbmCloudPower::ApiError => err
     # Handle HTTP 500 errors during VM initialization (e.g., BDM attachment in progress)
@@ -193,13 +191,34 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
 
   def create_and_attach_affinity_volumes(vm_ems_ref, vm_instance_name)
     new_volumes = options[:new_volumes] || []
+    _log.info("#{self.class}##{__method__} VM #{vm_ems_ref} new_volumes count=#{new_volumes.size}")
     return if new_volumes.empty?
 
     phase_context[:new_volumes] ||= []
+    pass      = get_option(:pass).to_i
+    pass      = 1 if pass < 1
+    # :total_vms is a plain integer stored by set_request_values before
+    # :number_of_vms is clamped — so get_option always returns it reliably.
+    total_vms = get_option(:total_vms).to_i
+    total_vms = 1 if total_vms < 1
+    multi_vm  = pass > 1 || total_vms > 1
+
+    _log.info("#{self.class}##{__method__} pass=#{pass} total_vms=#{total_vms} multi_vm=#{multi_vm}")
 
     source.with_provider_connection(:service => "PCloudVolumesApi") do |api|
-      new_volumes.each do |new_volume|
+      new_volumes.each_with_index do |new_volume, idx|
+        # Single-instance: keep base name as-is (e.g. "spVol").
+        # Multi-instance: append zero-padded suffix per VM so names are
+        # unique across tasks: spVol001 (pass=1), spVol002 (pass=2), etc.
+        vol_name = if multi_vm
+                     seq = "%03d" % (((pass - 1) * new_volumes.size) + idx + 1)
+                     "#{new_volume[:name]}#{seq}"
+                   else
+                     new_volume[:name]
+                   end
+        _log.info("#{self.class}##{__method__} creating affinity volume '#{vol_name}' (pass=#{pass}, total_vms=#{total_vms}) for VM #{vm_ems_ref}")
         volume_params = new_volume.merge(
+          :name                  => vol_name,
           :affinity_policy       => "affinity",
           :affinity_pvm_instance => vm_instance_name
         )
@@ -209,11 +228,13 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
           IbmCloudPower::CreateDataVolume.new(volume_params)
         )
 
+        _log.info("#{self.class}##{__method__} created volume id=#{created_volume.volume_id} name='#{vol_name}'")
         begin
           api.pcloud_pvminstances_volumes_post(cloud_instance_id, vm_ems_ref, created_volume.volume_id)
           phase_context[:new_volumes] << created_volume.volume_id
-        rescue IbmCloudPower::ApiError
-          _log.warn("Failed to attach volume #{created_volume.volume_id} to #{vm_ems_ref}, deleting orphaned volume")
+          _log.info("#{self.class}##{__method__} attached volume #{created_volume.volume_id} to VM #{vm_ems_ref}")
+        rescue IbmCloudPower::ApiError => e
+          _log.warn("#{self.class}##{__method__} failed to attach volume #{created_volume.volume_id} to #{vm_ems_ref} (#{e.message}), deleting orphaned volume")
           api.pcloud_cloudinstances_volumes_delete(cloud_instance_id, created_volume.volume_id)
           raise
         end
