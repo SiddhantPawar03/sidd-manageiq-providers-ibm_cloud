@@ -153,32 +153,31 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
 
     source.with_provider_connection(:service => "PCloudPVMInstancesApi") do |api|
       statuses = ids.each_with_object(Hash.new { |h, k| h[k] = [] }) do |id, result|
-        begin
-          instance = api.pcloud_pvminstances_get(cloud_instance_id, id)
+        instance = api.pcloud_pvminstances_get(cloud_instance_id, id)
 
-          result[instance.status] << {
+        result[instance.status] << {
+          :id       => id,
+          :instance => instance
+        }
+
+        if instance.status == 'ACTIVE' &&
+           instance.processors.to_f > 0 &&
+           instance.memory.to_f > 0
+          result['ACTIVE_READY'] << {
             :id       => id,
             :instance => instance
           }
-
-          if instance.status == 'ACTIVE' &&
-             instance.processors.to_f > 0 &&
-             instance.memory.to_f > 0
-            result['ACTIVE_READY'] << {
-              :id       => id,
-              :instance => instance
-            }
-          end
-        rescue IbmCloudPower::ApiError => e
-          # The instance may not be queryable immediately after creation (transient
-          # 500s are common in the first few seconds).  Treat it as still building.
-          _log.warn("Transient error polling instance #{id}: #{e.message}. Will retry.")
-          result['BUILD'] << {:id => id}
         end
+      rescue IbmCloudPower::ApiError => e
+        # The instance may not be queryable immediately after creation (transient
+        # 500s are common in the first few seconds).  Treat it as still building.
+        _log.warn("Transient error polling instance #{id}: #{e.message}. Will retry.")
+        result['BUILD'] << {:id => id}
       end
 
-      raise MiqException::MiqProvisionError,
-            _("An error occurred while provisioning the instance.") if statuses['ERROR'].any?
+      if statuses['ERROR'].any?
+        raise MiqException::MiqProvisionError, _("An error occurred while provisioning the instance.")
+      end
 
       if statuses['BUILD'].any?
         return false,
@@ -243,7 +242,7 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
       new_volumes.each do |new_volume|
         vol_name =
           if get_option(:replicants).to_i > 1
-            "#{new_volume[:name]}#{format('%03d', instance_index)}"
+            "#{new_volume[:name]}#{'%03d' % instance_index}"
           else
             new_volume[:name]
           end
