@@ -160,9 +160,7 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
           :instance => instance
         }
 
-        if instance.status == 'ACTIVE' &&
-           instance.processors.to_f > 0 &&
-           instance.memory.to_f > 0
+        if instance.status == 'ACTIVE' && instance.processors.to_f > 0 && instance.memory.to_f > 0
           result['ACTIVE_READY'] << {
             :id       => id,
             :instance => instance
@@ -180,8 +178,7 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
       end
 
       if statuses['BUILD'].any?
-        return false,
-              "#{statuses['BUILD'].length} of #{ids.length} instance(s) still provisioning."
+        return false, "#{statuses['BUILD'].length} of #{ids.length} instance(s) still provisioning."
       end
 
       if options[:new_volumes].present?
@@ -191,17 +188,19 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
 
         if pending_instances.any?
           pending_instances.each do |entry|
+            instance_index = ids.index(entry[:id]) + 1
+
             create_and_attach_affinity_volumes(
               entry[:id],
-              entry[:instance].server_name
+              entry[:instance].server_name,
+              instance_index
             )
 
             phase_context[:affinity_volumes_attached] ||= {}
             phase_context[:affinity_volumes_attached][entry[:id]] = true
           end
 
-          return false,
-                "Instances active. Creating and attaching affinity volumes."
+          return false, "Instances active. Creating and attaching affinity volumes."
         end
       end
 
@@ -228,17 +227,13 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
     end
   end
 
-  def create_and_attach_affinity_volumes(vm_ems_ref, vm_instance_name)
+  def create_and_attach_affinity_volumes(vm_ems_ref, vm_instance_name, instance_index)
     new_volumes = options[:new_volumes] || []
     return if new_volumes.empty?
 
     phase_context[:new_volumes] ||= []
-    phase_context[:affinity_volume_instance_index] ||= 0
 
     source.with_provider_connection(:service => "PCloudVolumesApi") do |api|
-      phase_context[:affinity_volume_instance_index] += 1
-      instance_index = phase_context[:affinity_volume_instance_index]
-
       new_volumes.each do |new_volume|
         vol_name =
           if get_option(:replicants).to_i > 1
