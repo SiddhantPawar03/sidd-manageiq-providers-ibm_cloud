@@ -203,16 +203,16 @@ describe ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provi
 
       expect(complete).to be(false)
       expect(status).to eq("Instances active. Creating and attaching affinity volumes.")
-      expect(provision).to have_received(:create_and_attach_affinity_volumes).with("id-1", "vm1").once
-      expect(provision).to have_received(:create_and_attach_affinity_volumes).with("id-2", "vm2").once
+      expect(provision).to have_received(:create_and_attach_affinity_volumes).with("id-1", "vm1", 1).once
+      expect(provision).to have_received(:create_and_attach_affinity_volumes).with("id-2", "vm2", 2).once
       expect(provision.phase_context[:affinity_volumes_attached]).to eq({"id-1" => true, "id-2" => true})
 
       complete, status = provision.check_task_clone(["id-1", "id-2"])
 
       expect(complete).to be(true)
       expect(status).to eq("All 2 instance(s) provisioned and active.")
-      expect(provision).to have_received(:create_and_attach_affinity_volumes).with("id-1", "vm1").once
-      expect(provision).to have_received(:create_and_attach_affinity_volumes).with("id-2", "vm2").once
+      expect(provision).to have_received(:create_and_attach_affinity_volumes).with("id-1", "vm1", 1).once
+      expect(provision).to have_received(:create_and_attach_affinity_volumes).with("id-2", "vm2", 2).once
     end
 
     it "uses a per-request sequence for replicated affinity volume names" do
@@ -246,14 +246,13 @@ describe ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provi
       end
       allow(volume_api).to receive(:pcloud_pvminstances_volumes_post)
 
-      provision.create_and_attach_affinity_volumes("id-1", "vm1")
-      provision.create_and_attach_affinity_volumes("id-2", "vm2")
-      provision.create_and_attach_affinity_volumes("id-3", "vm3")
-      provision.create_and_attach_affinity_volumes("id-4", "vm4")
+      provision.create_and_attach_affinity_volumes("id-1", "vm1", 1)
+      provision.create_and_attach_affinity_volumes("id-2", "vm2", 2)
+      provision.create_and_attach_affinity_volumes("id-3", "vm3", 3)
+      provision.create_and_attach_affinity_volumes("id-4", "vm4", 4)
 
       expect(volume_requests.map(&:name)).to eq(%w[data001 data002 data003 data004])
       expect(volume_requests.map(&:affinity_pvm_instance)).to eq(%w[vm1 vm2 vm3 vm4])
-      expect(provision.phase_context[:affinity_volume_instance_index]).to eq(4)
     end
   end
 
