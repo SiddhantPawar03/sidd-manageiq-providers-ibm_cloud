@@ -155,7 +155,7 @@ describe ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provi
   end
 
   context "cloning affinity volumes" do
-    let(:provision_class) do
+    let(:cloning_class) do
       Class.new do
         include ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provision::Cloning
 
@@ -187,32 +187,92 @@ describe ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provi
       end
     end
 
-    let(:provision) { provision_class.new }
+    let(:state_machine_class) do
+      Class.new do
+        include ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provision::Cloning
+        include ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provision::StateMachine
+
+        public :attach_affinity_volumes
+
+        attr_accessor :options, :phase_context
+
+        def initialize
+          @options = {}
+          @phase_context = {}
+        end
+
+        def source
+          @source ||= Object.new
+        end
+
+        def cloud_instance_id
+          "cloud-instance-id"
+        end
+
+        def get_option(key)
+          options[key]
+        end
+
+        def _log
+          @log ||= Logger.new(nil)
+        end
+
+        def update_and_notify_parent(**_kwargs); end
+
+        def signal(_state); end
+      end
+    end
+
+    let(:provision) { cloning_class.new }
     let(:api) { instance_double("PCloudPVMInstancesApi") }
     let(:instance1) { double(:status => "ACTIVE", :processors => 1.0, :memory => 1024, :server_name => "vm1") }
     let(:instance2) { double(:status => "ACTIVE", :processors => 1.0, :memory => 1024, :server_name => "vm2") }
 
-    it "creates affinity volumes once per active instance" do
+    it "returns true and stores active_instances in phase_context when all instances are ACTIVE_READY" do
+      provision.options = {:new_volumes => [{:name => "data", :size => 10}]}
+      allow(provision.source).to receive(:with_provider_connection).and_yield(api)
+      allow(api).to receive(:pcloud_pvminstances_get).with("cloud-instance-id", "id-1").and_return(instance1)
+      allow(api).to receive(:pcloud_pvminstances_get).with("cloud-instance-id", "id-2").and_return(instance2)
+
+      complete, status = provision.check_task_clone(["id-1", "id-2"])
+
+      expect(complete).to be(true)
+      expect(status).to eq("All 2 instance(s) provisioned and active.")
+      expect(provision.phase_context[:active_instances]).to eq(
+        [{:id => "id-1", :server_name => "vm1"}, {:id => "id-2", :server_name => "vm2"}]
+      )
+    end
+
+    it "does not call create_and_attach_affinity_volumes from check_task_clone" do
       provision.options = {:new_volumes => [{:name => "data", :size => 10}]}
       allow(provision.source).to receive(:with_provider_connection).and_yield(api)
       allow(api).to receive(:pcloud_pvminstances_get).with("cloud-instance-id", "id-1").and_return(instance1)
       allow(api).to receive(:pcloud_pvminstances_get).with("cloud-instance-id", "id-2").and_return(instance2)
       allow(provision).to receive(:create_and_attach_affinity_volumes)
 
-      complete, status = provision.check_task_clone(["id-1", "id-2"])
+      provision.check_task_clone(["id-1", "id-2"])
 
-      expect(complete).to be(false)
-      expect(status).to eq("Instances active. Creating and attaching affinity volumes.")
-      expect(provision).to have_received(:create_and_attach_affinity_volumes).with("id-1", "vm1", 1).once
-      expect(provision).to have_received(:create_and_attach_affinity_volumes).with("id-2", "vm2", 2).once
-      expect(provision.phase_context[:affinity_volumes_attached]).to eq({"id-1" => true, "id-2" => true})
+      expect(provision).not_to have_received(:create_and_attach_affinity_volumes)
+    end
 
-      complete, status = provision.check_task_clone(["id-1", "id-2"])
+    it "attach_affinity_volumes calls create_and_attach_affinity_volumes for each instance and signals poll_destination_in_vmdb" do
+      sm_provision = state_machine_class.new
+      sm_provision.options = {:new_volumes => [{:name => "data", :size => 10}]}
+      sm_provision.phase_context = {
+        :active_instances => [
+          {:id => "id-1", :server_name => "vm1"},
+          {:id => "id-2", :server_name => "vm2"}
+        ]
+      }
+      allow(sm_provision).to receive(:create_and_attach_affinity_volumes)
+      allow(sm_provision).to receive(:signal)
 
-      expect(complete).to be(true)
-      expect(status).to eq("All 2 instance(s) provisioned and active.")
-      expect(provision).to have_received(:create_and_attach_affinity_volumes).with("id-1", "vm1", 1).once
-      expect(provision).to have_received(:create_and_attach_affinity_volumes).with("id-2", "vm2", 2).once
+      sm_provision.attach_affinity_volumes
+
+      expect(sm_provision).to have_received(:create_and_attach_affinity_volumes).with("id-1", "vm1", 1).once
+      expect(sm_provision).to have_received(:create_and_attach_affinity_volumes).with("id-2", "vm2", 2).once
+      expect(sm_provision).to have_received(:signal).with(:poll_destination_in_vmdb)
+      expect(sm_provision.phase_context[:active_instances]).to be_nil
     end
 
     it "uses a per-request sequence for replicated affinity volume names" do

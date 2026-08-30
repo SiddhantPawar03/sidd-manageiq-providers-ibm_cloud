@@ -181,32 +181,16 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
         return false, "#{statuses['BUILD'].length} of #{ids.length} instance(s) still provisioning."
       end
 
-      if options[:new_volumes].present?
-        pending_instances = statuses['ACTIVE'].reject do |entry|
-          phase_context.fetch(:affinity_volumes_attached, {}).key?(entry[:id])
-        end
-
-        if pending_instances.any?
-          pending_instances.each do |entry|
-            instance_index = ids.index(entry[:id]) + 1
-
-            create_and_attach_affinity_volumes(
-              entry[:id],
-              entry[:instance].server_name,
-              instance_index
-            )
-
-            phase_context[:affinity_volumes_attached] ||= {}
-            phase_context[:affinity_volumes_attached][entry[:id]] = true
-          end
-
-          return false, "Instances active. Creating and attaching affinity volumes."
-        end
-      end
-
       all_done = statuses['ACTIVE_READY'].length == ids.length
 
       phase_context[:cloud_api_completion_time] = Time.zone.now.utc if all_done
+
+      # Store active instance metadata for attach_affinity_volumes to consume
+      if all_done && options[:new_volumes].present?
+        phase_context[:active_instances] = statuses['ACTIVE_READY'].map do |entry|
+          {:id => entry[:id], :server_name => entry[:instance].server_name}
+        end
+      end
 
       status =
         if all_done

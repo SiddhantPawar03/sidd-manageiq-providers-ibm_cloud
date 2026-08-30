@@ -38,17 +38,36 @@ module ManageIQ::Providers::IbmCloud::PowerVirtualServers::CloudManager::Provisi
         EmsRefresh.queue_refresh(manager)
       end
 
-      signal :poll_destination_in_vmdb
+      if options[:new_volumes].present?
+        signal :attach_affinity_volumes
+      else
+        signal :poll_destination_in_vmdb
+      end
     else
       requeue_phase
     end
   end
 
+  def attach_affinity_volumes
+    active_instances = phase_context.delete(:active_instances) || []
+    ids = active_instances.map { |e| e[:id] }
+
+    active_instances.each_with_index do |entry, idx|
+      create_and_attach_affinity_volumes(entry[:id], entry[:server_name], idx + 1)
+    end
+
+    message = "Affinity volumes created and attached for #{ids.length} instance(s)."
+    _log.info(message)
+    update_and_notify_parent(:message => message)
+
+    signal :poll_destination_in_vmdb
+  end
+
   def prepare_volumes_and_networks
     # New volumes require affinity to the VM's boot volume storage pool,
     # which is only known after the VM is created and ACTIVE.
-    # They are created and attached in check_task_clone via
-    # create_and_attach_affinity_volumes once the VM reaches ACTIVE state.
+    # They are created and attached in the attach_affinity_volumes state
+    # after all instances reach ACTIVE_READY.
     phase_context[:new_volumes] = []
 
     phase_context[:new_networks] = []
